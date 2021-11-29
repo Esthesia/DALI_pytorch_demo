@@ -1,4 +1,6 @@
+from numpy.matrixlib.defmatrix import matrix
 import torch, math
+import time
 
 import threading
 from torch.multiprocessing import Event
@@ -6,12 +8,12 @@ from torch._six import queue
 
 try:
     from nvidia.dali.plugin.pytorch import DALIClassificationIterator
+    from nvidia.dali.plugin.pytorch import DALIGenericIterator
     from nvidia.dali.pipeline import Pipeline
     import nvidia.dali.ops as ops
     import nvidia.dali.types as types
 except ImportError:
     raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
-
 
 class HybridTrainPipe(Pipeline):
     """
@@ -48,7 +50,33 @@ class HybridTrainPipe(Pipeline):
         # Enabling read_ahead slowed down processing ~40%
         self.input = ops.FileReader(file_root=data_dir, shard_id=local_rank, num_shards=world_size,
                                     random_shuffle=shuffle)
+        # self.augment_list = [
+        # (AutoContrast, 0, 1),
+        # (Equalize, 0, 1),
+        # (Invert, 0, 1),
+        # (Rotate, 0, 30),
+        # (Posterize, 0, 4),
+        # (Solarize, 0, 256),
+        # (SolarizeAdd, 0, 110),
+        # (Color, 0.1, 1.9),
+        # (Contrast, 0.1, 1.9),
+        # (Brightness, 0.1, 1.9),
+        # (Sharpness, 0.1, 1.9),
+        # (ShearX, 0., 0.3),
+        # (ShearY, 0., 0.3),
+        # (CutoutAbs, 0, 40),
+        # (TranslateXabs, 0., 100),
+        # (TranslateYabs, 0., 100),
+        # ]
 
+        # this is for the random factor on DALI integrated with RandAugment
+        self.factor = 0.5
+        self.img_size = (480, 640)
+        self.trans_factor = 1 * self.img_size[0] # -0.45 <= trans_factor <= 0.45
+
+        self.tmp_seed = 1
+        self.tmp_print_seed= 0      
+        
         # Let user decide which pipeline works best with the chosen model
         if dali_cpu:
             decode_device = "cpu"
@@ -70,6 +98,9 @@ class HybridTrainPipe(Pipeline):
                                                mean=mean,
                                                std=std,)
 
+            self.randbrightness = ops.BrightnessContrast(device="gpu",
+                                                         brightness=self.factor)
+                 
         # To be able to handle all images from full-sized ImageNet, this padding sets the size of the internal
         # nvJPEG buffers without additional reallocations
         device_memory_padding = 211025920 if decode_device == 'mixed' else 0
@@ -97,9 +128,23 @@ class HybridTrainPipe(Pipeline):
 
         # Resize as desired
         images = self.res(images)
-
+        
+        print("Define Graphs")
         if self.dali_device == "gpu":
-            output = self.cmn(images, mirror=rng)
+            if self.tmp_seed == 0:
+                output = self.cmn(images, mirror=rng)
+                self.tmp_seed = 1
+            else:
+                start_time = time.time()
+                output = self.randbrightness(images)
+                self.tmp_seed = 0
+                self.tmp_print_seed += 1
+                if self.tmp_print_seed == 1:
+                    print("Every 20 times randbrightness called")
+                    end_time = time.time()
+                    print("{} processing time".format(end_time - start_time))
+                    self.tmp_print_seed = 0
+                output = self.cmn(output, mirror=rng)
         else:
             # CPU backend uses torch to apply mean & std
             output = self.flip(images, horizontal=rng)
@@ -107,7 +152,11 @@ class HybridTrainPipe(Pipeline):
         self.labels = self.labels.gpu()
         return [output, self.labels]
 
-
+    # @pipeline_def
+    # def b_gpu_pipeline(self):
+    #     self.jpegs, self.labels = self.input(name="Reader")
+    #     images = self.decode(self.jpegs)
+    #     images = self
 class HybridValPipe(Pipeline):
     """
     DALI Validation Pipeline
@@ -163,6 +212,7 @@ class HybridValPipe(Pipeline):
                                                 mean=mean,
                                                 std=std)
 
+        
         self.decode = ops.ImageDecoder(device=decode_device, output_type=types.RGB)
 
         # Resize to desired size.  To match torchvision dataloader, use triangular interpolation
@@ -180,8 +230,6 @@ class HybridValPipe(Pipeline):
 
         self.labels = self.labels.gpu()
         return [output, self.labels]
-
-
 class DaliIterator():
     """
     Wrapper class to decode the DALI iterator output & provide iterator that functions the same as torchvision
