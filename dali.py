@@ -12,9 +12,158 @@ try:
     from nvidia.dali.pipeline import Pipeline
     import nvidia.dali.ops as ops
     import nvidia.dali.types as types
+    import nvidia.dali.fn as fn
 except ImportError:
     raise ImportError("Please install DALI from https://www.github.com/NVIDIA/DALI to run this example.")
 
+class RandAugmentPipe(Pipeline):
+    """[summary]
+
+    Args:
+        Pipeline ([type]): [description]
+
+    Raises:
+        StopIteration: [description]
+        StopIteration: [description]
+
+    Returns:
+        [type]: [description]
+    """
+    def __init__(self, batch_size, num_threads, device_id, data_dir, crop,
+                 mean, std, local_rank, world_size, dali_cpu=False, shuffle=True, fp16=False,
+                 min_crop_size=0.08, aug_name_list=[], aug_factor=1):
+        
+        super(RandAugmentPipe, self).__init__(batch_size, num_threads, device_id, seed=-1)
+        
+        self.input = ops.FileReader(file_root=data_dir, shard_id=local_rank, num_shards=world_size,
+                                    random_shuffle=shuffle)
+
+        if dali_cpu:
+            decode_device = "cpu"
+            self.dali_device = "cpu"
+            self.flip = ops.Flip(device=self.dali_device)
+        else:
+            decode_device = "mixed"
+            self.dali_device = "gpu"
+
+            output_dtype = types.FLOAT
+            if self.dali_device == "gpu" and fp16:
+                output_dtype = types.FLOAT16            
+
+            self.cmn = ops.CropMirrorNormalize(device="gpu",
+                                               output_dtype=output_dtype,
+                                               output_layout=types.NCHW,
+                                               crop=(crop, crop),
+                                               image_type=types.RGB,
+                                               mean=mean,
+                                               std=std,)
+
+            self.augmentations = {}
+            for op, minval, maxval in aug_name_list:
+                
+                if op == "Brightness":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval
+                    '''
+                    fn.brightness_contrast
+                    
+                    out = brightness_shift * output_range + brightness \
+                        * (contrast_center + contrast * (in - contrast_center))
+                    '''
+                    self.augmentations["Brightness"] = \
+                        lambda images: fn.brightness_contrast(images,
+                                                              brightness_shift=val)
+                if op == "Contrast":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval
+                    self.augmentations["Contrast"] = \
+                        lambda images: fn.brightness_contrast(images,
+                                                              contrast=val)
+
+                if op == "Rotate":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval                    
+                    self.augmentations["Rotate"] = \
+                        lambda images: fn.rotate(images,
+                                                 angle=val,
+                                                 interp_type=types.INTERP_LINEAR,
+                                                 fill_value=0)
+                if op == "Invert":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval
+                    # Color value inverting - implement with flip for convenience
+                    self.augmentations["Invert"] = \
+                        lambda images: fn.flip(images,
+                                            vertical=0,
+                                            horizontal=1)
+                    
+                if op == "ShearX":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval 
+                    # ShearX img.transform(img.size, PIL.Image.AFFINE, (1, v, 0, 0, 1, 0))
+                    self.augmentations["ShearX"] = \
+                        lambda images: fn.warp_affine(images,
+                                                      matrix=[1.0, val, 0.0, 0.0, 1.0, 0.0],
+                                                      interp_type=types.INTERP_LINEAR)
+                if op == "ShearY":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval
+                    # ShearY img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, v, 1, 0))
+                    self.augmentations["ShearY"] = \
+                        lambda images: fn.warp_affine(images,
+                                                      matrix=[1.0, 0.0, 0.0, val, 1.0, 0.0],
+                                                      interp_type=types.INTERP_LINEAR)
+                if op == "TranslateXabs":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval    
+                    # TranslateX abs img.transform(img.size, PIL.Image.AFFINE, (1, 0, v, 0, 1, 0)) 
+                    self.augmentations["TranslateXabs"] = \
+                        lambda images: fn.warp_affine(images,
+                                                      matrix=[1.0, 0.0, val, 0.0, 1.0, 0.0],
+                                                      interp_type=types.INTERP_LINEAR)
+                if op == "TranslateYabs":
+                    val = (float(aug_factor) / 30) * float(maxval - minval) + minval
+                    # TranslateY abs img.transform(img.size, PIL.Image.AFFINE, (1, 0, 0, 0, 1, v))
+                    self.augmentations["TranslateYabs"] = \
+                        lambda images: fn.warp_affine(images,
+                                                      matrix=[1.0, 0.0, 0.0, 0.0, 1.0, val],
+                                                      interp_type=types.INTERP_LINEAR)
+        
+            
+
+        # To be able to handle all images from full-sized ImageNet, 
+        # this padding sets the size of the internal nvJPEG buffers without additional reallocations
+        
+        # Don't know why this is needed, but only by duplication
+        device_memory_padding = 211025920 if decode_device == 'mixed' else 0
+        host_memory_padding = 140544512 if decode_device == 'mixed' else 0
+        self.decode = ops.ImageDecoderRandomCrop(device=decode_device, output_type=types.RGB,
+                                                 device_memory_padding=device_memory_padding,
+                                                 host_memory_padding=host_memory_padding,
+                                                 random_aspect_ratio=[0.8, 1.25],
+                                                 random_area=[min_crop_size, 1.0],
+                                                 num_attempts=100)
+
+        # Resize as desired.  To match torchvision data loader, use triangular interpolation.
+        self.res = ops.Resize(device=self.dali_device, resize_x=crop, resize_y=crop,
+                              interp_type=types.INTERP_TRIANGULAR)
+
+        self.coin = ops.CoinFlip(probability=0.5)
+        print('DALI "{0}" variant'.format(self.dali_device))                                        
+
+    def define_graph(self):
+        rng = self.coin()
+        self.jpegs, self.labels = self.input(name="Reader")            
+
+        # Combined decode & random crop
+        images = self.decode(self.jpegs)
+
+        # Resize as desired
+        images = self.res(images)        
+        
+        if self.dali_device == "gpu":
+            for aug in self.augmentations.values():
+                images = aug(images)
+            output = self.cmn(images, mirror=rng)
+
+        else:
+            output = self.flip(images, horizontal=rng)
+        
+        self.labels = self.labels.gpu()
+        return [output, self.labels]        
 class HybridTrainPipe(Pipeline):
     """
     DALI Train Pipeline
@@ -42,7 +191,7 @@ class HybridTrainPipe(Pipeline):
 
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop,
                  mean, std, local_rank=0, world_size=1, dali_cpu=False, shuffle=True, fp16=False,
-                 min_crop_size=0.08):
+                 min_crop_size=0.08, aug_name_list=[] ,aug_factor=1):
 
         # As we're recreating the Pipeline at every epoch, the seed must be -1 (random seed)
         super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=-1)
@@ -50,27 +199,10 @@ class HybridTrainPipe(Pipeline):
         # Enabling read_ahead slowed down processing ~40%
         self.input = ops.FileReader(file_root=data_dir, shard_id=local_rank, num_shards=world_size,
                                     random_shuffle=shuffle)
-        # self.augment_list = [
-        # (AutoContrast, 0, 1),
-        # (Equalize, 0, 1),
-        # (Invert, 0, 1),
-        # (Rotate, 0, 30),
-        # (Posterize, 0, 4),
-        # (Solarize, 0, 256),
-        # (SolarizeAdd, 0, 110),
-        # (Color, 0.1, 1.9),
-        # (Contrast, 0.1, 1.9),
-        # (Brightness, 0.1, 1.9),
-        # (Sharpness, 0.1, 1.9),
-        # (ShearX, 0., 0.3),
-        # (ShearY, 0., 0.3),
-        # (CutoutAbs, 0, 40),
-        # (TranslateXabs, 0., 100),
-        # (TranslateYabs, 0., 100),
-        # ]
 
         # this is for the random factor on DALI integrated with RandAugment
-        self.factor = 0.5
+        self.factor = aug_factor
+        self.aug_list = aug_name_list
         self.img_size = (480, 640)
         self.trans_factor = 1 * self.img_size[0] # -0.45 <= trans_factor <= 0.45
 
@@ -100,7 +232,7 @@ class HybridTrainPipe(Pipeline):
 
             self.randbrightness = ops.BrightnessContrast(device="gpu",
                                                          brightness=self.factor)
-                 
+                        
         # To be able to handle all images from full-sized ImageNet, this padding sets the size of the internal
         # nvJPEG buffers without additional reallocations
         device_memory_padding = 211025920 if decode_device == 'mixed' else 0
@@ -129,7 +261,6 @@ class HybridTrainPipe(Pipeline):
         # Resize as desired
         images = self.res(images)
         
-        print("Define Graphs")
         if self.dali_device == "gpu":
             if self.tmp_seed == 0:
                 output = self.cmn(images, mirror=rng)
@@ -152,11 +283,6 @@ class HybridTrainPipe(Pipeline):
         self.labels = self.labels.gpu()
         return [output, self.labels]
 
-    # @pipeline_def
-    # def b_gpu_pipeline(self):
-    #     self.jpegs, self.labels = self.input(name="Reader")
-    #     images = self.decode(self.jpegs)
-    #     images = self
 class HybridValPipe(Pipeline):
     """
     DALI Validation Pipeline

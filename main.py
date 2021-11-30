@@ -69,6 +69,9 @@ parser.add_argument('-t', '--test', action='store_true',
 
 parser.add_argument("--local_rank", default=0, type=int)
 
+parser.add_argument("--rand_factor",default=[2,2],action='store_true',
+                    help='RandAugment factor input [M, N]')
+
 cudnn.benchmark = True
 
 best_prec1 = 0
@@ -85,6 +88,7 @@ if args.test:
     args.prof = True
     args.data.append('/data/imagenet/train-jpeg/')
     args.data.append('/data/imagenet/val-jpeg/')
+
 
 if not len(args.data):
     raise Exception("error: too few arguments")
@@ -180,6 +184,7 @@ def main():
                       use_dali=args.use_dali,
                       dali_cpu=args.dali_cpu,
                       fp16=args.fp16,
+                      rand_factor=args.rand_factor,
                       )
 
     if args.evaluate:

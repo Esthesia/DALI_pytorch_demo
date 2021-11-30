@@ -2,13 +2,14 @@ import os, gc, time
 import numpy as np
 import torch
 import importlib
+import random
 
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 
 try:
     from nvidia import dali
-    from dali import HybridTrainPipe, HybridValPipe, DaliIteratorCPU, DaliIteratorGPU
+    from dali import RandAugmentPipe, HybridTrainPipe, HybridValPipe, DaliIteratorCPU, DaliIteratorGPU
 except:
     print('Could not import DALI')
 
@@ -67,6 +68,7 @@ class Dataset():
                  std=(0.229 * 255, 0.224 * 255, 0.225 * 255),
                  pin_memory=True,
                  pin_memory_dali=False,
+                 rand_factor = [1, 1]
                  ):
 
             self.batch_size = batch_size
@@ -83,6 +85,8 @@ class Dataset():
             self.std = std
             self.pin_memory = pin_memory
             self.pin_memory_dali = pin_memory_dali
+            self.num_of_ops = rand_factor[0]
+            self.degree_of_ops = rand_factor[1]
 
             self.val_size = val_size
             if self.val_size is None:
@@ -135,17 +139,55 @@ class Dataset():
             val_dataset, batch_size=self.val_batch_size, shuffle=False, num_workers=self.workers,
             pin_memory=self.pin_memory, sampler=self.val_sampler, collate_fn=fast_collate)
 
+    def augment_list(self):
+    # https://github.com/tensorflow/tpu/blob/8462d083dd89489a79e3200bcc8d4063bf362186/models/official/efficientnet/autoaugment.py#L505
+        l = [
+            # (AutoContrast, 0, 1),
+            # (Equalize, 0, 1),
+            ("Invert", 0, 1),
+            ("Rotate", 0, 30),
+            # (Posterize, 0, 4),
+            # (Solarize, 0, 256),
+            # (SolarizeAdd, 0, 110), 
+            # (Color, 0.1, 1.9),
+            ("Contrast", 0.1, 1.9),
+            ("Brightness", 0.1, 1.9),
+            ("Sharpness", 0.1, 1.9),
+            ("ShearX", 0., 0.3),
+            ("ShearY", 0., 0.3),
+            # (CutoutAbs, 0, 40),
+            ("TranslateXabs", 0., 100),
+            ("TranslateYabs", 0., 100),
+        ]
+
+        return l
+    
     def _build_dali_pipeline(self, val_on_cpu=True):
         assert self.world_size == 1, 'Distributed support not tested yet'
-
+        
         iterator_train = DaliIteratorGPU
+        
+        aug_list = self.augment_list()
+        ops = random.choices(aug_list,k=self.num_of_ops)
+        
+        self.train_pipe = RandAugmentPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
+                                          data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
+                                          mean=self.mean, std=self.std, local_rank=0,
+                                          world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)
+        
+        
+        # self.train_pipe = HybridTrainPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
+        #                                   data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
+        #                                   mean=self.mean, std=self.std, local_rank=0,
+        #                                   world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)
+
         if self.dali_cpu:
             iterator_train = DaliIteratorCPU
-
-        self.train_pipe = HybridTrainPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
+            self.train_pipe = HybridTrainPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
                                           data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
                                           mean=self.mean, std=self.std, local_rank=0,
                                           world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size)
+        
 
         self.train_pipe.build()
         self.train_loader = iterator_train(pipelines=self.train_pipe, size=self.get_nb_train() / self.world_size, fp16=self.fp16, mean=self.mean, std=self.std, pin_memory=self.pin_memory_dali)
