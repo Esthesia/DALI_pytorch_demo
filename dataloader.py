@@ -152,7 +152,7 @@ class Dataset():
             # (Color, 0.1, 1.9),
             ("Contrast", 0.1, 1.9),
             ("Brightness", 0.1, 1.9),
-            ("Sharpness", 0.1, 1.9),
+            # ("Sharpness", 0.1, 1.9),
             ("ShearX", 0., 0.3),
             ("ShearY", 0., 0.3),
             # (CutoutAbs, 0, 40),
