@@ -193,6 +193,11 @@ class Dataset():
         self.train_loader = iterator_train(pipelines=self.train_pipe, size=self.get_nb_train() / self.world_size, fp16=self.fp16, mean=self.mean, std=self.std, pin_memory=self.pin_memory_dali)
 
         iterator_val = DaliIteratorGPU
+        
+        self.val_pipe = RandAugmentPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
+                                          data_dir=self.valdir, crop=self.size, dali_cpu=self.dali_cpu,
+                                          mean=self.mean, std=self.std, local_rank=0,
+                                          world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)
         if val_on_cpu:
             iterator_val = DaliIteratorCPU
 
@@ -262,7 +267,7 @@ class Dataset():
 
             # taken from: https://stackoverflow.com/questions/1254370/reimport-a-module-in-python-while-interactive
             importlib.reload(dali)
-            from dali import HybridTrainPipe, HybridValPipe, DaliIteratorCPU, DaliIteratorGPU
+            from dali import RandAugmentPipe, HybridTrainPipe, HybridValPipe, DaliIteratorCPU, DaliIteratorGPU
 
             self._build_dali_pipeline(val_on_cpu=val_on_cpu)
 

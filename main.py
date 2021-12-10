@@ -66,9 +66,7 @@ parser.add_argument('--prof', dest='prof', action='store_true',
                     help='Only run 10 iterations for profiling.')
 parser.add_argument('-t', '--test', action='store_true',
                     help='Launch test mode with preset arguments')
-
 parser.add_argument("--local_rank", default=0, type=int)
-
 parser.add_argument("--rand_factor",default=[2,2],action='store_true',
                     help='RandAugment factor input [M, N]')
 
@@ -98,12 +96,12 @@ if 'WORLD_SIZE' in os.environ:
     args.distributed = int(os.environ['WORLD_SIZE']) > 1
 
 # make apex optional
-if args.fp16 or args.distributed:
-    try:
-        from apex.parallel import DistributedDataParallel as DDP
-        from apex.fp16_utils import *
-    except ImportError:
-        raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
+# if args.fp16 or args.distributed:
+#     try:
+#         from apex.parallel import DistributedDataParallel as DDP
+#         from apex.fp16_utils import *
+#     except ImportError:
+#         raise ImportError("Please install apex from https://www.github.com/nvidia/apex to run this example.")
 
 # item() is a recent addition, so this helps with backward compatibility.
 def to_python_float(t):
@@ -118,12 +116,12 @@ def main():
     args.gpu = 0
     args.world_size = 1
 
-    if args.distributed:
-        args.gpu = args.local_rank % torch.cuda.device_count()
-        torch.cuda.set_device(args.gpu)
-        torch.distributed.init_process_group(backend='nccl',
-                                             init_method='env://')
-        args.world_size = torch.distributed.get_world_size()
+    # if args.distributed:
+    #     args.gpu = args.local_rank % torch.cuda.device_count()
+    #     torch.cuda.set_device(args.gpu)
+    #     torch.distributed.init_process_group(backend='nccl',
+    #                                          init_method='env://')
+    #     args.world_size = torch.distributed.get_world_size()
 
     args.total_batch_size = args.world_size * args.batch_size
 
@@ -143,12 +141,12 @@ def main():
         model = models.__dict__[args.arch]()
 
     model = model.cuda()
-    if args.fp16:
-        model = network_to_half(model)
-    if args.distributed:
-        # shared param/delay all reduce turns off bucketing in DDP, for lower latency runs this can improve perf
-        # for the older version of APEX please use shared_param, for newer one it is delay_allreduce
-        model = DDP(model, delay_allreduce=True)
+    # if args.fp16:
+    #     model = network_to_half(model)
+    # if args.distributed:
+    #     # shared param/delay all reduce turns off bucketing in DDP, for lower latency runs this can improve perf
+    #     # for the older version of APEX please use shared_param, for newer one it is delay_allreduce
+    #     model = DDP(model, delay_allreduce=True)
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()

@@ -59,8 +59,9 @@ class RandAugmentPipe(Pipeline):
                                                std=std,)
 
             self.augmentations = {}
+            self.meta_augmentations = []
             for op, minval, maxval in aug_name_list:
-                
+                self.meta_augmentations.append(op)
                 if op == "Brightness":
                     val = (float(aug_factor) / 30) * float(maxval - minval) + minval
                     '''
@@ -123,7 +124,7 @@ class RandAugmentPipe(Pipeline):
                                                       interp_type=types.INTERP_LINEAR)
         
             
-
+        # chekddasmdo
         # To be able to handle all images from full-sized ImageNet, 
         # this padding sets the size of the internal nvJPEG buffers without additional reallocations
         
@@ -155,6 +156,7 @@ class RandAugmentPipe(Pipeline):
         images = self.res(images)        
         
         if self.dali_device == "gpu":
+            print(self.meta_augmentations)
             for aug in self.augmentations.values():
                 images = aug(images)
             output = self.cmn(images, mirror=rng)
