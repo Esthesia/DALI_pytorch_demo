@@ -9,19 +9,19 @@ import torchvision.datasets as datasets
 
 try:
     from nvidia import dali
-    from dali import RandAugmentPipe, HybridTrainPipe, HybridValPipe, DaliIteratorCPU, DaliIteratorGPU
+    from dali import RandAugmentPipe, DaliIteratorCPU, DaliIteratorGPU
 except:
     print('Could not import DALI')
 
-def clear_memory(verbose=False):
-    stt = time.time()
+def clear_memory(verbose=True):
+    StartTime = time.time()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.empty_cache()  # https://forums.fast.ai/t/clearing-gpu-memory-pytorch/14637
     gc.collect()
 
     if verbose:
-        print('Cleared memory.  Time taken was %f secs' % (time.time() - stt))
+        print('Cleared memory.  Time taken was %f secs' % (time.time() - StartTime))
 
 
 class Dataset():
@@ -168,28 +168,30 @@ class Dataset():
         iterator_train = DaliIteratorGPU
         
         aug_list = self.augment_list()
+        ops_list = []
+        # for i in range(self.batch_size):
+        #     ops = random.choices(aug_list,k=self.num_of_ops)
+        #     ops_list.append(ops)
+        # print(f"{len(ops_list)} with per ops_list is {len(ops_list[0])}")
         ops = random.choices(aug_list,k=self.num_of_ops)
-        
+
         self.train_pipe = RandAugmentPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
                                           data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
                                           mean=self.mean, std=self.std, local_rank=0,
                                           world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)
-        
-        
-        # self.train_pipe = HybridTrainPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
-        #                                   data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
-        #                                   mean=self.mean, std=self.std, local_rank=0,
-        #                                   world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)
+                
 
         if self.dali_cpu:
+            print("dali_cpu set on TRUE")
             iterator_train = DaliIteratorCPU
-            self.train_pipe = HybridTrainPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
-                                          data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
-                                          mean=self.mean, std=self.std, local_rank=0,
-                                          world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size)
-        
+
+            self.train_pipe = RandAugmentPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
+                                              data_dir=self.traindir, crop=self.size, dali_cpu=self.dali_cpu,
+                                              mean=self.mean, std=self.std, local_rank=0,
+                                              world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)       
 
         self.train_pipe.build()
+        print(f"train pipeline is built with size {self.get_nb_train()}")
         self.train_loader = iterator_train(pipelines=self.train_pipe, size=self.get_nb_train() / self.world_size, fp16=self.fp16, mean=self.mean, std=self.std, pin_memory=self.pin_memory_dali)
 
         iterator_val = DaliIteratorGPU
@@ -200,11 +202,6 @@ class Dataset():
                                           world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)
         if val_on_cpu:
             iterator_val = DaliIteratorCPU
-
-        self.val_pipe = HybridValPipe(batch_size=self.val_batch_size, num_threads=self.workers, device_id=0,
-                                      data_dir=self.valdir, crop=self.size, size=self.val_size, dali_cpu=val_on_cpu,
-                                      mean=self.mean, std=self.std, local_rank=0,
-                                      world_size=self.world_size, shuffle=False, fp16=self.fp16)
 
         self.val_pipe.build()
         self.val_loader = iterator_val(pipelines=self.val_pipe, size=self.get_nb_val() / self.world_size, fp16=self.fp16, mean=self.mean, std=self.std, pin_memory=self.pin_memory_dali)
@@ -267,7 +264,7 @@ class Dataset():
 
             # taken from: https://stackoverflow.com/questions/1254370/reimport-a-module-in-python-while-interactive
             importlib.reload(dali)
-            from dali import RandAugmentPipe, HybridTrainPipe, HybridValPipe, DaliIteratorCPU, DaliIteratorGPU
+            from dali import RandAugmentPipe, DaliIteratorCPU, DaliIteratorGPU
 
             self._build_dali_pipeline(val_on_cpu=val_on_cpu)
 

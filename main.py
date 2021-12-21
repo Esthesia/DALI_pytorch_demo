@@ -2,6 +2,7 @@ import argparse
 import os
 import shutil
 import time
+import random
 
 import torch
 import torch.nn as nn
@@ -45,12 +46,8 @@ parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)')
 parser.add_argument('--print-freq', '-p', default=10, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                    help='path to latest checkpoint (default: none)')
 parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                     help='evaluate model on validation set')
-parser.add_argument('--pretrained', dest='pretrained', action='store_true',
-                    help='use pre-trained model')
 parser.add_argument('--fp16', action='store_true',
                     help='Run model fp16 mode.')
 parser.add_argument('--use-dali', action='store_true',
@@ -62,31 +59,13 @@ parser.add_argument('--static-loss-scale', type=float, default=1,
 parser.add_argument('--dynamic-loss-scale', action='store_true',
                     help='Use dynamic loss scaling.  If supplied, this argument supersedes ' +
                     '--static-loss-scale.')
-parser.add_argument('--prof', dest='prof', action='store_true',
-                    help='Only run 10 iterations for profiling.')
-parser.add_argument('-t', '--test', action='store_true',
-                    help='Launch test mode with preset arguments')
 parser.add_argument("--local_rank", default=0, type=int)
 parser.add_argument("--rand_factor",default=[2,2],action='store_true',
                     help='RandAugment factor input [M, N]')
 
 cudnn.benchmark = True
 
-best_prec1 = 0
 args = parser.parse_args()
-
-# test mode, use default args for sanity test
-if args.test:
-    args.fp16 = False
-    args.epochs = 1
-    args.start_epoch = 0
-    args.arch = 'resnet50'
-    args.batch_size = 64
-    args.data = []
-    args.prof = True
-    args.data.append('/data/imagenet/train-jpeg/')
-    args.data.append('/data/imagenet/val-jpeg/')
-
 
 if not len(args.data):
     raise Exception("error: too few arguments")
@@ -111,7 +90,7 @@ def to_python_float(t):
         return t[0]
 
 def main():
-    global best_prec1, args
+    global args
 
     args.gpu = 0
     args.world_size = 1
@@ -133,14 +112,17 @@ def main():
             print("Warning:  if --fp16 is not used, static_loss_scale will be ignored.")
 
     # create model
-    if args.pretrained:
-        print("=> using pre-trained model '{}'".format(args.arch))
-        model = models.__dict__[args.arch](pretrained=True)
-    else:
-        print("=> creating model '{}'".format(args.arch))
-        model = models.__dict__[args.arch]()
+    print("=> creating model '{}'".format(args.arch))
+    model = models.__dict__[args.arch]()
 
     model = model.cuda()
+    
+    # define loss function (criterion) and optimizer
+    criterion = nn.CrossEntropyLoss().cuda()
+
+    optimizer = torch.optim.SGD(model.parameters(), args.lr,
+                                momentum=args.momentum,
+                                weight_decay=args.weight_decay)
     # if args.fp16:
     #     model = network_to_half(model)
     # if args.distributed:
@@ -148,31 +130,13 @@ def main():
     #     # for the older version of APEX please use shared_param, for newer one it is delay_allreduce
     #     model = DDP(model, delay_allreduce=True)
 
-    # define loss function (criterion) and optimizer
-    criterion = nn.CrossEntropyLoss().cuda()
+    # if args.fp16:
+    #     optimizer = FP16_Optimizer(optimizer,
+    #                                static_loss_scale=args.static_loss_scale,
+    #                                dynamic_loss_scale=args.dynamic_loss_scale)
 
-    optimizer = torch.optim.SGD(model.parameters(), args.lr,
-                                momentum=args.momentum,
-                                weight_decay=args.weight_decay)
-    if args.fp16:
-        optimizer = FP16_Optimizer(optimizer,
-                                   static_loss_scale=args.static_loss_scale,
-                                   dynamic_loss_scale=args.dynamic_loss_scale)
-
-    # optionally resume from a checkpoint
-    if args.resume:
-        if os.path.isfile(args.resume):
-            print("=> loading checkpoint '{}'".format(args.resume))
-            checkpoint = torch.load(args.resume, map_location=lambda storage, loc: storage.cuda(args.gpu))
-            args.start_epoch = checkpoint['epoch']
-            best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            print("=> loaded checkpoint '{}' (epoch {})"
-                  .format(args.resume, checkpoint['epoch']))
-        else:
-            print("=> no checkpoint found at '{}'".format(args.resume))
-
+    print(f"{args.use_dali} on using_DALI option and {args.dali_cpu} on using CPU with DALI")
+    
     # Create dataloader
     dataset = Dataset(data_dir=args.data,
                       batch_size=args.batch_size,
@@ -195,32 +159,55 @@ def main():
 
         avg_train_time = train(dataset, model, criterion, optimizer, epoch)
         total_time.update(avg_train_time)
-        if args.prof:
-            break
+
         # Set dataset to GPU mode, to speed up validation - it's pretty slow otherwise with this new resizing
-        dataset.prep_for_val()
+        # dataset.prep_for_val()
 
         # evaluate on validation set
-        [prec1, prec5] = validate(dataset, model, criterion)
-
+        # [prec1, prec5] = validate(dataset, model, criterion)
+        # [prec1, prec5] = [0, 0]
         # remember best prec@1 and save checkpoint
         if args.local_rank == 0:
-            is_best = prec1 > best_prec1
-            best_prec1 = max(prec1, best_prec1)
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'best_prec1': best_prec1,
-                'optimizer': optimizer.state_dict(),
-            }, is_best)
-            if epoch == args.epochs - 1:
-                print('##Top-1 {0}\n'
-                      '##Top-5 {1}\n'
-                      '##Perf  {2}'.format(prec1, prec5, args.total_batch_size / total_time.avg))
+            # is_best = prec1 > best_prec1
+            # best_prec1 = max(prec1, best_prec1)
+            # save_checkpoint({
+            #     'epoch': epoch + 1,
+            #     'arch': args.arch,
+            #     'state_dict': model.state_dict(),
+            #     'best_prec1': best_prec1,
+            #     'optimizer': optimizer.state_dict(),
+            # }, is_best)
+            ####################################
+            # if epoch == args.epochs - 1:
+            #     print('##Perf  {0}'.format(args.total_batch_size / total_time.avg))
 
         # reset DALI iterators
         dataset.reset()
+
+
+def augment_list():
+
+    l = [
+        # (AutoContrast, 0, 1),
+        # (Equalize, 0, 1),
+        ("Invert", 0, 1),
+        ("Rotate", 0, 30),
+        # (Posterize, 0, 4),
+        # (Solarize, 0, 256),
+        # (SolarizeAdd, 0, 110), 
+        # (Color, 0.1, 1.9),
+        ("Contrast", 0.1, 1.9),
+        ("Brightness", 0.1, 1.9),
+        # ("Sharpness", 0.1, 1.9),
+        ("ShearX", 0., 0.3),
+        ("ShearY", 0., 0.3),
+        # (CutoutAbs, 0, 40),
+        ("TranslateXabs", 0., 100),
+        ("TranslateYabs", 0., 100),
+    ]
+
+    return l
+
 
 def train(dataset, model, criterion, optimizer, epoch, warmup_batches=10, prof_batches=100):
     batch_time = AverageMeter()
@@ -229,76 +216,97 @@ def train(dataset, model, criterion, optimizer, epoch, warmup_batches=10, prof_b
     top1 = AverageMeter()
     top5 = AverageMeter()
 
+    data_arr = []
+    
     train_loader = dataset.get_train_loader()
 
     # switch to train mode
     model.train()
     end = time.time()
+    end_time = torch.cuda.Event(enable_timing=True)
+    end_time.record()
+
+    aug_list = augment_list()
 
     for i, data in enumerate(train_loader):
         input = data[0]
         target = data[1]
-
+        # print(target)
+        # ops_list = []
+        # for i in range(len(input)):
+        #     ops = random.choices(aug_list,k=2)
+        #     ops_list.append(ops)
+        # print(f"{len(ops_list)} with per ops_list is {len(ops_list[0])}")
+        
         adjust_learning_rate(optimizer, epoch, i, len(train_loader))
+        
+        check_time = torch.cuda.Event(enable_timing=True)
+        check_time.record()
 
-        if args.prof:
-            # Allow 10 warmup batches
-            if i == warmup_batches:
-                epoch_stt_time = time.time()
-            if i > (warmup_batches + prof_batches):
-                break
         # measure data loading time
         data_time.update(time.time() - end)
+        print(f"data time is {time.time()-end}")
+        # # compute output
+        # output = model(input)
+        # loss = criterion(output, target)
 
-        # compute output
-        output = model(input)
-        loss = criterion(output, target)
+        # # measure accuracy and record loss
+        # prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
 
-        # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        # if args.distributed:
+        #     reduced_loss = reduce_tensor(loss.data)
+        #     prec1 = reduce_tensor(prec1)
+        #     prec5 = reduce_tensor(prec5)
+        # else:
+        #     reduced_loss = loss.data
 
-        if args.distributed:
-            reduced_loss = reduce_tensor(loss.data)
-            prec1 = reduce_tensor(prec1)
-            prec5 = reduce_tensor(prec5)
-        else:
-            reduced_loss = loss.data
+        # losses.update(to_python_float(reduced_loss), input.size(0))
+        # top1.update(to_python_float(prec1), input.size(0))
+        # top5.update(to_python_float(prec5), input.size(0))
 
-        losses.update(to_python_float(reduced_loss), input.size(0))
-        top1.update(to_python_float(prec1), input.size(0))
-        top5.update(to_python_float(prec5), input.size(0))
+        # # compute gradient and do SGD step
+        # optimizer.zero_grad()
+        # if args.fp16:
+        #     optimizer.backward(loss)
+        # else:
+        #     loss.backward()
+        # optimizer.step()
 
-        # compute gradient and do SGD step
-        optimizer.zero_grad()
-        if args.fp16:
-            optimizer.backward(loss)
-        else:
-            loss.backward()
-        optimizer.step()
-
-        torch.cuda.synchronize()
+        # torch.cuda.synchronize()
         # measure elapsed time
+        
         batch_time.update(time.time() - end)
-
+        
+        data_arr.append((end_time, check_time))
+        
+        end_time = torch.cuda.Event(enable_timing=True)
+        end_time.record()
         end = time.time()
+        ####################################
+        # if args.local_rank == 0 and i % args.print_freq == 0 and i > 1:
+        # print('Epoch: [{0}][{1}/{2}]\t'
+        #         'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+        #         'Speed {3:.3f} ({4:.3f})\t'
+        #         'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'.format(
+        #         epoch, i, len(train_loader),
+        #         args.total_batch_size / batch_time.val,
+        #         args.total_batch_size / batch_time.avg,
+        #         batch_time=batch_time.avg,
+        #         data_time=data_time.val))
+        print(f"{epoch} : {batch_time.val} {data_time.val}")
+        break
 
-        if args.local_rank == 0 and i % args.print_freq == 0 and i > 1:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                  'Speed {3:.3f} ({4:.3f})\t'
-                  'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                   epoch, i, len(train_loader),
-                   args.total_batch_size / batch_time.val,
-                   args.total_batch_size / batch_time.avg,
-                   batch_time=batch_time,
-                   data_time=data_time, loss=losses, top1=top1, top5=top5))
 
-    if args.prof:
-        print('Training speed was %d images/s' % (args.batch_size * prof_batches / (time.time() - epoch_stt_time)))
-
+    sum_time = 0
+    for i in range(len(data_arr)):
+        data_arr[i][0].synchronize()
+        datatime = data_arr[i][0].elapsed_time(data_arr[i][1])/1000
+        sum_time += datatime
+        # print(f"{i} iterations {datatime}")
+        
+    print(f"{sum_time} at corresponding epochs basd on CUDA events")
+    
+        
     return batch_time.avg
 
 
@@ -361,10 +369,10 @@ def validate(dataset, model, criterion):
     return [top1.avg, top5.avg]
 
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
-    torch.save(state, filename)
-    if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+# def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+#     torch.save(state, filename)
+#     if is_best:
+#         shutil.copyfile(filename, 'model_best.pth.tar')
 
 
 class AverageMeter(object):
