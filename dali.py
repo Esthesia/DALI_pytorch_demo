@@ -20,18 +20,6 @@ except ImportError:
 class RandAugmentPipe(Pipeline):
     print('Using DALI RandAugment iterator')
 
-    """[summary]
-
-    Args:
-        Pipeline ([type]): [description]
-
-    Raises:
-        StopIteration: [description]
-        StopIteration: [description]
-
-    Returns:
-        [type]: [description]
-    """
     def __init__(self, batch_size, num_threads, device_id, data_dir, crop,
                  mean, std, local_rank, world_size, dali_cpu=False, shuffle=True, fp16=False,
                  min_crop_size=0.08, aug_name_list=[], aug_factor=1):
@@ -45,7 +33,7 @@ class RandAugmentPipe(Pipeline):
         self.mean = mean
         self.std = std
         if dali_cpu:
-            decode_device = "cpu"
+            self.decode_device = "cpu"
             self.dali_device = "cpu"
             output_dtype = types.FLOAT
             self.flip = ops.Flip(device=self.dali_device)
@@ -117,7 +105,7 @@ class RandAugmentPipe(Pipeline):
 
 
         else:
-            decode_device = "mixed"
+            self.decode_device = "mixed"
             self.dali_device = "gpu"
 
             output_dtype = types.FLOAT
@@ -195,40 +183,21 @@ class RandAugmentPipe(Pipeline):
                         lambda images: fn.warp_affine(images,
                                                     matrix=[1.0, 0.0, 0.0, 0.0, 1.0, val],
                                                     interp_type=types.INTERP_LINEAR)
-    
-            
-        # chekddasmdo
-        # To be able to handle all images from full-sized ImageNet, 
-        # this padding sets the size of the internal nvJPEG buffers without additional reallocations
-        
-        # Don't know why this is needed, but only by duplication
-        # device_memory_padding = 211025920 if decode_device == 'mixed' else 0
-        # host_memory_padding = 140544512 if decode_device == 'mixed' else 0
-        # self.decode = fn.decoders.image_random_crop(device=decode_device, output_type=types.RGB,
-        #                                          device_memory_padding=device_memory_padding,
-        #                                          host_memory_padding=host_memory_padding,
-        #                                          random_aspect_ratio=[0.8, 1.25],
-        #                                          random_area=[min_crop_size, 1.0],
-        #                                          num_attempts=100)
-
-        # Resize as desired.  To match torchvision data loader, use triangular interpolation.
-        self.res = ops.Resize(device=self.dali_device, resize_x=crop, resize_y=crop,
-                              interp_type=types.INTERP_TRIANGULAR)
 
         self.coin = ops.random.CoinFlip(probability=0.5)
-        print('DALI "{0}" variant'.format(self.dali_device))                                        
+        # print('DALI "{0}" variant'.format(self.dali_device))                                        
 
     def define_graph(self):
         rng = self.coin()
         self.jpegs, self.labels = self.input(name="Reader")            
 
         # Combined decode & random crop
-        images = fn.decoders.image(self.jpegs, device=self.dali_device)
+        images = fn.decoders.image(self.jpegs, device=self.decode_device)
         # Resize as desired
         images = fn.resize(images, resize_x = self.crop, resize_y=self.crop)
            
         
-        print(self.pipe_BatchSize)
+        # print(self.pipe_BatchSize)
 
         if self.dali_device == "gpu":
             print(self.meta_augmentations)
@@ -256,126 +225,6 @@ class RandAugmentPipe(Pipeline):
             output = self.flip(images, horizontal=rng)
         self.labels = self.labels.gpu()
         return [output, self.labels]        
-class HybridTrainPipe(Pipeline):
-    """
-    DALI Train Pipeline
-    Based on the official example: https://github.com/NVIDIA/DALI/blob/master/docs/examples/pytorch/resnet50/main.py
-    In comparison to the example, the CPU backend does more computation on CPU, reducing GPU load & memory use.
-    This dataloader implements ImageNet style training preprocessing, namely:
-    -random resized crop
-    -random horizontal flip
-
-    batch_size (int): how many samples per batch to load
-    num_threads (int): how many DALI workers to use for data loading.
-    device_id (int): GPU device ID
-    data_dir (str): Directory to dataset.  Format should be the same as torchvision dataloader,
-    containing train & val subdirectories, with image class subfolders
-    crop (int): Image output size (typically 224 for ImageNet)
-    mean (tuple): Image mean value for each channel
-    std (tuple): Image standard deviation value for each channel
-    local_rank (int, optional, default = 0) – Id of the part to read
-    world_size (int, optional, default = 1) - Partition the data into this many parts (used for multiGPU training)
-    dali_cpu (bool, optional, default = False) - Use DALI CPU mode instead of GPU
-    shuffle (bool, optional, default = True) - Shuffle the dataset each epoch
-    fp16 (bool, optional, default = False) - Output the data in fp16 instead of fp32 (GPU mode only)
-    min_crop_size (float, optional, default = 0.08) - Minimum random crop size
-    """
-
-    def __init__(self, batch_size, num_threads, device_id, data_dir, crop,
-                 mean, std, local_rank=0, world_size=1, dali_cpu=False, shuffle=True, fp16=False,
-                 min_crop_size=0.08, aug_name_list=[] ,aug_factor=1):
-
-        # As we're recreating the Pipeline at every epoch, the seed must be -1 (random seed)
-        super(HybridTrainPipe, self).__init__(batch_size, num_threads, device_id, seed=-1)
-
-        # Enabling read_ahead slowed down processing ~40%
-        self.input = ops.readers.File(file_root=data_dir, shard_id=local_rank, num_shards=world_size,
-                                    random_shuffle=shuffle)
-
-        # this is for the random factor on DALI integrated with RandAugment
-        self.factor = aug_factor
-        self.aug_list = aug_name_list
-        self.img_size = (480, 640)
-        self.trans_factor = 1 * self.img_size[0] # -0.45 <= trans_factor <= 0.45
-        self.crop = crop
-        self.mean = mean
-        self.std = std
-        self.tmp_seed = 1
-        self.tmp_print_seed= 0      
-        
-        # Let user decide which pipeline works best with the chosen model
-        if dali_cpu:
-            decode_device = "cpu"
-            self.dali_device = "cpu"
-            self.flip = ops.Flip(device=self.dali_device)
-        else:
-            decode_device = "mixed"
-            self.dali_device = "gpu"
-
-            output_dtype = types.FLOAT
-            if self.dali_device == "gpu" and fp16:
-                output_dtype = types.FLOAT16
-
-            self.cmn = ops.CropMirrorNormalize(device="gpu",
-                                               dtype=output_dtype,
-                                               output_layout=types.NCHW,
-                                               crop=(crop, crop),
-                                               mean=mean,
-                                               std=std,)
-
-                        
-        # To be able to handle all images from full-sized ImageNet, this padding sets the size of the internal
-        # nvJPEG buffers without additional reallocations
-        # ImageDecoderRandomCrop is deprecated
-        # device_memory_padding = 211025920 if decode_device == 'mixed' else 0
-        # host_memory_padding = 140544512 if decode_device == 'mixed' else 0
-        # self.decode = ops.ImageDecoderRandomCrop(device=decode_device, output_type=types.RGB,
-        #                                          device_memory_padding=device_memory_padding,
-        #                                          host_memory_padding=host_memory_padding,
-        #                                          random_aspect_ratio=[0.8, 1.25],
-        #                                          random_area=[min_crop_size, 1.0],
-        #                                          num_attempts=100)
-
-        # Resize as desired.  To match torchvision data loader, use triangular interpolation.
-        # Deprecation so changed into the functional API
-        # self.res = ops.Resize(device=self.dali_device, resize_x=crop, resize_y=crop,
-        #                       interp_type=types.INTERP_TRIANGULAR)
-
-        self.coin = ops.random.CoinFlip(probability=0.5)
-        print('DALI "{0}" variant'.format(self.dali_device))
-
-    def define_graph(self):
-        rng = self.coin()
-        self.jpegs, self.labels = self.input(name="Reader")
-
-        # Combined decode & random crop
-        # images = self.decode(self.jpegs)
-        images = fn.decoders.image(self.jpegs, device=self.dali_device)
-        # Resize as desired
-        images = fn.resize(images, resize_x = self.crop, resize_y=self.crop)
-        
-        if self.dali_device == "gpu":
-            if self.tmp_seed == 0:
-                output = self.cmn(images, mirror=rng)
-                self.tmp_seed = 1
-            else:
-                start_time = time.time()
-                output = self.randbrightness(images)
-                self.tmp_seed = 0
-                self.tmp_print_seed += 1
-                if self.tmp_print_seed == 1:
-                    print("Every 20 times randbrightness called")
-                    end_time = time.time()
-                    print("{} processing time".format(end_time - start_time))
-                    self.tmp_print_seed = 0
-                output = self.cmn(output, mirror=rng)
-
-        else:
-            # CPU backend uses torch to apply mean & std
-            output = self.flip(images, horizontal=rng)
-
-        self.labels = self.labels.gpu()
-        return [output, self.labels]
 class DaliIterator():
     """
     Wrapper class to decode the DALI iterator output & provide iterator that functions the same as torchvision
@@ -432,7 +281,7 @@ def _preproc_worker(dali_iterator, cuda_stream, fp16, mean, std, output_queue, p
         proc_next_input.clear()
 
         if done_event.is_set():
-            print('Shutting down preproc thread')
+            # print('Shutting down preproc thread')
             break
 
         try:
@@ -443,22 +292,22 @@ def _preproc_worker(dali_iterator, cuda_stream, fp16, mean, std, output_queue, p
             target = data[0]['label'].squeeze().long()  # DALI should already output target on device
 
             # Copy to GPU and apply final processing in separate CUDA stream
-            with torch.cuda.stream(cuda_stream):
-                input = input_orig
-                if pin_memory:
-                    input = input.pin_memory()
-                    del input_orig  # Save memory
-                input = input.cuda(non_blocking=True)
+            # with torch.cuda.stream(cuda_stream):
+            #     input = input_orig
+            #     if pin_memory:
+            #         input = input.pin_memory()
+            #         del input_orig  # Save memory
+            #     input = input.cuda(non_blocking=True)
 
-                input = input.permute(0, 3, 1, 2)
+            #     input = input.permute(0, 3, 1, 2)
 
-                # Input tensor is kept as 8-bit integer for transfer to GPU, to save bandwidth
-                if fp16:
-                    input = input.half()
-                else:
-                    input = input.float()
+            #     # Input tensor is kept as 8-bit integer for transfer to GPU, to save bandwidth
+            #     if fp16:
+            #         input = input.half()
+            #     else:
+            #         input = input.float()
 
-                input = input.sub_(mean).div_(std)
+            #     input = input.sub_(mean).div_(std)
 
             # Put the result on the queue
             output_queue.put((input, target))

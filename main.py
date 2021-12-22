@@ -178,8 +178,9 @@ def main():
             #     'optimizer': optimizer.state_dict(),
             # }, is_best)
             ####################################
-            # if epoch == args.epochs - 1:
-            #     print('##Perf  {0}'.format(args.total_batch_size / total_time.avg))
+            if epoch == args.epochs - 1:
+                print("DONE")
+                # print('##Perf  {0}'.format(args.total_batch_size / total_time.avg))
 
         # reset DALI iterators
         dataset.reset()
@@ -227,7 +228,8 @@ def train(dataset, model, criterion, optimizer, epoch, warmup_batches=10, prof_b
     end_time.record()
 
     aug_list = augment_list()
-
+    checker = 0
+    
     for i, data in enumerate(train_loader):
         input = data[0]
         target = data[1]
@@ -237,15 +239,15 @@ def train(dataset, model, criterion, optimizer, epoch, warmup_batches=10, prof_b
         #     ops = random.choices(aug_list,k=2)
         #     ops_list.append(ops)
         # print(f"{len(ops_list)} with per ops_list is {len(ops_list[0])}")
-        
-        adjust_learning_rate(optimizer, epoch, i, len(train_loader))
-        
         check_time = torch.cuda.Event(enable_timing=True)
         check_time.record()
 
         # measure data loading time
         data_time.update(time.time() - end)
         print(f"data time is {time.time()-end}")
+        
+        adjust_learning_rate(optimizer, epoch, i, len(train_loader))
+        
         # # compute output
         # output = model(input)
         # loss = criterion(output, target)
@@ -294,7 +296,10 @@ def train(dataset, model, criterion, optimizer, epoch, warmup_batches=10, prof_b
         #         batch_time=batch_time.avg,
         #         data_time=data_time.val))
         print(f"{epoch} : {batch_time.val} {data_time.val}")
-        break
+        checker = checker + 1
+        if checker == 5:
+            break
+    
 
 
     sum_time = 0
@@ -302,7 +307,7 @@ def train(dataset, model, criterion, optimizer, epoch, warmup_batches=10, prof_b
         data_arr[i][0].synchronize()
         datatime = data_arr[i][0].elapsed_time(data_arr[i][1])/1000
         sum_time += datatime
-        # print(f"{i} iterations {datatime}")
+        print(f"{i} iterations {datatime}")
         
     print(f"{sum_time} at corresponding epochs basd on CUDA events")
     

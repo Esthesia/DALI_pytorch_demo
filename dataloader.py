@@ -21,7 +21,8 @@ def clear_memory(verbose=True):
     gc.collect()
 
     if verbose:
-        print('Cleared memory.  Time taken was %f secs' % (time.time() - StartTime))
+        pass
+        # print('Cleared memory.  Time taken was %f secs' % (time.time() - StartTime))
 
 
 class Dataset():
@@ -182,7 +183,7 @@ class Dataset():
                 
 
         if self.dali_cpu:
-            print("dali_cpu set on TRUE")
+            # print("dali_cpu set on TRUE")
             iterator_train = DaliIteratorCPU
 
             self.train_pipe = RandAugmentPipe(batch_size=self.batch_size, num_threads=self.workers, device_id=0,
@@ -191,7 +192,7 @@ class Dataset():
                                               world_size=self.world_size, shuffle=True, fp16=self.fp16, min_crop_size=self.min_crop_size, aug_name_list=ops,aug_factor=self.degree_of_ops)       
 
         self.train_pipe.build()
-        print(f"train pipeline is built with size {self.get_nb_train()}")
+        # print(f"train pipeline is built with size {self.get_nb_train()}")
         self.train_loader = iterator_train(pipelines=self.train_pipe, size=self.get_nb_train() / self.world_size, fp16=self.fp16, mean=self.mean, std=self.std, pin_memory=self.pin_memory_dali)
 
         iterator_val = DaliIteratorGPU
