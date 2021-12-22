@@ -106,3 +106,6 @@ venv.bak/
 # Local Dataset
 size2/
 *.pth
+
+# Logging Dataset
+loggig/
